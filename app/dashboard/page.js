@@ -3,8 +3,9 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '../lib/supabaseClient';
 import { Download, FileText, Calendar, LogOut, CheckCircle, Package } from 'lucide-react';
-import { getXmlNFCeAction, getXmlNFSeAction, getPdfNFeAction, getPdfNFSeAction } from '../actions/fiscal';
+import { getXmlNFSeAction, getXmlNFeAction, getPdfNFeAction, getPdfNFSeAction } from '../actions/fiscal';
 import JSZip from 'jszip';
+import { AlertCircle, XCircle, Info, Check } from 'lucide-react';
 
 export default function DashboardPage() {
     const router = useRouter();
@@ -17,6 +18,11 @@ export default function DashboardPage() {
     const [exporting, setExporting] = useState(false);
     const [userName, setUserName] = useState('');
     const [orgName, setOrgName] = useState('');
+    const [modal, setModal] = useState({ show: false, title: '', message: '', type: 'info' });
+
+    const showAlert = (message, title = 'Aviso', type = 'info') => {
+        setModal({ show: true, title, message, type });
+    };
 
     useEffect(() => {
         checkAuth();
@@ -87,13 +93,48 @@ export default function DashboardPage() {
                 .lte('created_at', `${endDate}T23:59:59`)
                 .order('created_at', { ascending: false });
 
-            if (servicesError) {
-                console.error('Error fetching services:', servicesError);
-            }
+            // 4. Fetch NFe (Modelo 55) from notas_fiscais
+            const { data: nfeList, error: nfeError } = await supabase
+                .from('notas_fiscais')
+                .select('*')
+                .eq('organization_id', orgId)
+                .gte('created_at', `${startDate}T00:00:00`)
+                .lte('created_at', `${endDate}T23:59:59`)
+                .order('created_at', { ascending: false });
 
-            // 4. Combine and Deduplicate by Reference (ref / nfe_id)
+            // 5. Fetch NFCe (Modelo 65) from nfce
+            const { data: nfceList, error: nfceError } = await supabase
+                .from('nfce')
+                .select('*')
+                .eq('organization_id', orgId)
+                .gte('created_at', `${startDate}T00:00:00`)
+                .lte('created_at', `${endDate}T23:59:59`)
+                .order('created_at', { ascending: false });
+
+            // 6. Combine and Deduplicate by Reference (ref / nfe_id)
             const rawInvoices = [
-                ...(sales || []).map(s => ({ ...s, modelo: 'nfce', display_id: s.nfe_id })),
+                ...(sales || []).map(s => ({
+                    ...s,
+                    modelo: 'nfce',
+                    nfe_id: s.nfe_ref || s.nfe_id, // prioritize ref
+                    display_id: s.nfe_id
+                })),
+                ...(nfceList || []).map(n => ({
+                    ...n,
+                    nfe_id: n.focus_nfe_ref || n.id,
+                    display_id: n.numero || n.focus_nfe_ref,
+                    total: n.valor_total,
+                    clients: { name: n.cliente_nome || 'Cliente Final' },
+                    modelo: 'nfce'
+                })),
+                ...(nfeList || []).map(n => ({
+                    ...n,
+                    nfe_id: n.focus_nfe_ref || n.id,
+                    display_id: n.numero || n.focus_nfe_ref,
+                    total: n.valor_total,
+                    clients: { name: n.cliente_nome || 'Cliente Final' },
+                    modelo: 'nfe'
+                })),
                 ...(services || []).map(s => ({
                     ...s,
                     nfe_id: s.ref,
@@ -148,7 +189,7 @@ export default function DashboardPage() {
             if (type === 'xml') {
                 result = isService
                     ? await getXmlNFSeAction(ref, invoice)
-                    : await getXmlNFCeAction(ref);
+                    : await getXmlNFeAction(ref);
             } else {
                 // PDF
                 result = isService
@@ -169,17 +210,17 @@ export default function DashboardPage() {
                         downloadBlob(blob, `${isService ? 'NFSe' : 'NFe'}-${ref}.pdf`);
                     } else {
                         // Fallback se vier URL
-                        alert('PDF gerado, mas formato inesperado. Verifique console.');
+                        showAlert('PDF gerado, mas formato inesperado. Verifique console.', 'Erro no PDF', 'error');
                         console.log('PDF Result:', result);
                     }
                 }
             } else {
-                alert(`Erro ao baixar ${type.toUpperCase()}: ` + (result.error || 'Conteúdo não retornado'));
+                showAlert((result.error || 'Conteúdo não retornado'), `Erro no ${type.toUpperCase()}`, 'error');
             }
 
         } catch (err) {
             console.error(err);
-            alert('Erro ao processar download.');
+            showAlert('Não foi possível processar o download da nota fiscal.', 'Erro de Processamento', 'error');
         } finally {
             setDownloading(null);
             setDownloadType(null);
@@ -192,7 +233,7 @@ export default function DashboardPage() {
         );
 
         if (authorizedInvoices.length === 0) {
-            alert('Não há notas autorizadas para exportar neste período.');
+            showAlert('Não há notas autorizadas para exportar neste período.', 'Nenhuma Nota', 'info');
             return;
         }
 
@@ -208,7 +249,7 @@ export default function DashboardPage() {
                 try {
                     const result = isService
                         ? await getXmlNFSeAction(ref, invoice)
-                        : await getXmlNFCeAction(ref);
+                        : await getXmlNFeAction(ref);
 
                     if (result.success && result.data) {
                         const xmlContent = result.data.raw || result.data;
@@ -225,11 +266,11 @@ export default function DashboardPage() {
                 const content = await zip.generateAsync({ type: 'blob' });
                 downloadBlob(content, `XMLs-${period}.zip`);
             } else {
-                alert('Nenhum XML disponível para exportação.');
+                showAlert('Nenhum XML disponível para exportação.', 'Aviso', 'warning');
             }
         } catch (err) {
             console.error('Erro na exportação em lote:', err);
-            alert('Ocorreu um erro ao gerar o arquivo ZIP.');
+            showAlert('Ocorreu um erro ao gerar o arquivo ZIP.', 'Erro na Exportação', 'error');
         } finally {
             setExporting(false);
         }
@@ -259,8 +300,61 @@ export default function DashboardPage() {
         router.push('/');
     };
 
+    // Componente de Modal Interno
+    const AlertModal = () => {
+        if (!modal.show) return null;
+
+        const getIcon = () => {
+            switch (modal.type) {
+                case 'error': return <XCircle size={48} color="#ef4444" />;
+                case 'warning': return <AlertCircle size={48} color="#f59e0b" />;
+                case 'success': return <Check size={48} color="#10b981" />;
+                default: return <Info size={48} color="#3b82f6" />;
+            }
+        };
+
+        return (
+            <div style={{
+                position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                background: 'rgba(0, 0, 0, 0.4)', backdropFilter: 'blur(4px)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                zIndex: 9999, animation: 'fadeIn 0.2s ease-out'
+            }}>
+                <div style={{
+                    background: 'white', padding: '2rem', borderRadius: '16px',
+                    width: '90%', maxWidth: '400px', boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)',
+                    textAlign: 'center', animation: 'scaleUp 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)'
+                }}>
+                    <div style={{ marginBottom: '1rem', display: 'flex', justifyContent: 'center' }}>
+                        {getIcon()}
+                    </div>
+                    <h3 style={{ fontSize: '1.25rem', fontWeight: '700', color: '#111827', marginBottom: '0.5rem' }}>{modal.title}</h3>
+                    <p style={{ color: '#4b5563', lineHeight: '1.5', marginBottom: '1.5rem' }}>{modal.message}</p>
+                    <button
+                        onClick={() => setModal({ ...modal, show: false })}
+                        style={{
+                            width: '100%', padding: '0.75rem', borderRadius: '8px',
+                            background: '#4338ca', color: 'white', border: 'none',
+                            fontWeight: '600', cursor: 'pointer', transition: 'filter 0.2s'
+                        }}
+                        onMouseOver={(e) => e.target.style.filter = 'brightness(1.1)'}
+                        onMouseOut={(e) => e.target.style.filter = 'none'}
+                    >
+                        Entendi
+                    </button>
+                </div>
+                <style dangerouslySetInnerHTML={{
+                    __html: `
+                    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+                    @keyframes scaleUp { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+                `}} />
+            </div>
+        );
+    };
+
     return (
         <div style={{ minHeight: '100vh', background: '#f5f7fa', fontFamily: 'system-ui, sans-serif' }}>
+            <AlertModal />
             {/* Header */}
             <header style={{ background: 'white', borderBottom: '1px solid #e5e7eb', padding: '1rem 2rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
@@ -362,10 +456,11 @@ export default function DashboardPage() {
                                             <td style={{ padding: '1rem 1.5rem' }}>
                                                 <span style={{
                                                     fontSize: '0.7rem', fontWeight: '700', padding: '0.15rem 0.5rem', borderRadius: '4px',
-                                                    background: (invoice.type === 'service' || invoice.modelo === 'nfse') ? '#e0e7ff' : '#fff7ed',
-                                                    color: (invoice.type === 'service' || invoice.modelo === 'nfse') ? '#3730a3' : '#9a3412'
+                                                    whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center',
+                                                    background: invoice.modelo === 'nfse' ? '#e0e7ff' : (invoice.modelo === 'nfce' ? '#fff7ed' : '#ecfdf5'),
+                                                    color: invoice.modelo === 'nfse' ? '#3730a3' : (invoice.modelo === 'nfce' ? '#9a3412' : '#065f46')
                                                 }}>
-                                                    {(invoice.type === 'service' || invoice.modelo === 'nfse') ? 'NFSe' : 'NFe/NFCe'}
+                                                    {invoice.modelo === 'nfse' ? 'NFS-e' : (invoice.modelo === 'nfce' ? 'NFC-e' : 'NF-e')}
                                                 </span>
                                             </td>
                                             <td style={{ padding: '1rem 1.5rem', fontFamily: 'ui-monospace, monospace', color: '#4b5563' }}>{invoice.nfe_id || '-'}</td>

@@ -191,13 +191,6 @@ export async function emitirNFeAction(vendaId, organizationId) {
             cep_destinatario: cliente?.cep?.replace(/\D/g, '') || '00000000',
             indicador_inscricao_estadual_destinatario: "9", // 9=não contribuinte
 
-            // Valores totais
-            valor_frete: "0.00",
-            valor_seguro: "0.00",
-            valor_total: String(venda.total?.toFixed(2) || "0.00"),
-            valor_produtos: String(venda.total?.toFixed(2) || "0.00"),
-            modalidade_frete: "9", // 9=sem frete
-
             // Itens
             items: venda.sale_items.map((item, index) => {
                 const produto = item.products || {};
@@ -501,6 +494,28 @@ export async function getXmlNFCeAction(ref) {
 
 
 /**
+ * Obter XML da NFe (Smart - Tenta NFe, depois NFCe)
+ */
+export async function getXmlNFeAction(ref) {
+    try {
+        // Tentativa 1: NFe
+        try {
+            const result = await focusNfeRequest(`/v2/nfe/${encodeURIComponent(ref)}.xml`, 'GET');
+            return { success: true, data: result };
+        } catch (e) {
+            // Fallback para NFCe
+        }
+
+        // Tentativa 2: NFCe
+        const resultNFCe = await focusNfeRequest(`/v2/nfce/${encodeURIComponent(ref)}.xml`, 'GET');
+        return { success: true, data: resultNFCe };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+}
+
+
+/**
  * Verificar se a empresa está cadastrada na Focus NFe (Diagnóstico)
  */
 export async function verificarCadastroFocusAction(cnpj) {
@@ -650,30 +665,8 @@ export async function createUpdateCompanyAction(data) {
 
     const AMBIENTE = (process.env.FOCUS_NFE_AMBIENTE || 'homologacao').trim();
 
-    // Determinar URL e Token baseados no ambiente correto (não forçar produção)
-
-
-    // AQUI ESTÁ O PULO DO GATO:
-    // Se o objetivo é editar a empresa, e o token atual falha...
-    // Vamos verificar se temos um "Token Mestre" configurado e tentar usar ele se o primeiro falhar?
-    // Não, vamos fazer direto.
-
-    // Se estivermos em HOMOLOGAÇÃO e tivermos um token de revenda que sabemos que funciona (talvez o 90MR seja aceito em endpoints globais? Não custa tentar ou manter como está).
-
-    // O usuário quer que funcione. O token 'uL2a...' (novo) também vai falhar para edição se for token comum.
-    // A única chance é se o '90MR...' tiver permissão em homologação (improvável se for de prod) OU se houver outro token.
-
-    // Vou manter a lógica atual de seleção, mas adicionar o log do novo token de produção que ele passou se ele quiser usar.
-    // Mas ele passou o token no chat, não no .env.local.
-
-    // RETER: O usuário pode estar confuso. Ele quer ajustar o cadastro.
-    // --- LÓGICA DE SINCRONIZAÇÃO TIPO ADMIN ---
-    // Mesmo em Homologação, a gestão de empresas deve ser feita na URL de Produção com Token de Referência.
-
     // 1. Configurar Token de Revenda (System Owner)
     const RESELLER_TOKEN = process.env.FOCUS_NFE_TOKEN_PRODUCAO || '90MRioho0tAMZRuEuUAkpKXOieFDGldO';
-    // Se estiver em produção, usa o token configurado no ambiente (que deve ser o de produção).
-    // Se estiver em homologação, FORÇA o uso do RESELLER_TOKEN para permitir gestão de empresas.
     const tokenToUse = AMBIENTE === 'producao'
         ? (process.env.FOCUS_NFE_TOKEN_PRODUCAO || process.env.FOCUS_NFE_TOKEN)
         : RESELLER_TOKEN;
@@ -733,8 +726,7 @@ export async function createUpdateCompanyAction(data) {
         let finalError = err.message;
         const msg = JSON.stringify(err.message || '');
 
-        // SOFT FAIL: Se for erro de permissão ou endpoint não encontrado (comum em homologação sem revenda habilitada),
-        // vamos considerar SUCESSO LOCAL para não travar o usuário, mas avisar.
+        // SOFT FAIL: Se for erro de permissão ou endpoint não encontrado
         if (msg.includes('Access denied') || msg.includes('Permissão Negada') || msg.includes('Endpoint nao encontrado') || (err.status === 403) || (err.status === 404)) {
             console.warn('[Focus NFe] Aviso: Edição bloqueada por permissão/acesso. Ignorando para UX.', finalError);
             return {
@@ -757,22 +749,10 @@ export async function uploadCertificateAction(cnpj, fileBase64, password) {
     }
 
     const cnpjLimpo = cnpj.replace(/\D/g, '');
-
-    // A API de cadastro de empresas da Focus NFe funciona APENAS em produção, mesmo para certificados de homologação.
     const COMPANIES_API_BASE = 'https://api.focusnfe.com.br';
 
-    console.log('[Focus NFe] DEBUG ENV:', {
-        FOCUS_NFE_AMBIENTE: process.env.FOCUS_NFE_AMBIENTE,
-        FOCUS_NFE_TOKEN_PRODUCAO: process.env.FOCUS_NFE_TOKEN_PRODUCAO ? '***' + process.env.FOCUS_NFE_TOKEN_PRODUCAO.slice(-4) : 'UNDEFINED'
-    });
-
-    // Token: Tenta o token de produção específico, senão usa o padrão
     const rawToken = process.env.FOCUS_NFE_TOKEN_PRODUCAO || process.env.FOCUS_NFE_TOKEN;
     const tokenToUse = rawToken ? rawToken.trim() : '';
-
-    // Debug
-    console.log(`[Focus NFe] Upload Certificado (Sempre em Produção): ${COMPANIES_API_BASE}`);
-    console.log(`[Focus NFe] Token final use: ...${tokenToUse ? tokenToUse.slice(-4) : 'NULO'}`);
 
     const authHeader = 'Basic ' + Buffer.from(tokenToUse + ':').toString('base64');
     const headers = { 'Authorization': authHeader, 'Content-Type': 'application/json' };
@@ -785,11 +765,8 @@ export async function uploadCertificateAction(cnpj, fileBase64, password) {
     try {
         console.log(`[Focus NFe] Iniciando upload certificado para CNPJ: ${cnpj} (Limpo: ${cnpjLimpo})`);
 
-        // PASSO INTELLIGENTE: Buscar ID da empresa primeiro
-        // Isso evita 404/403 se estiver usando token de revenda que exige ID em vez de CNPJ na URL do PUT
         let targetId = cnpjLimpo;
 
-        console.log(`[Focus NFe] Buscando ID interno da empresa...`);
         const resGet = await fetch(`${COMPANIES_API_BASE}/v2/empresas?cnpj=${cnpjLimpo}`, {
             method: 'GET',
             headers
@@ -800,89 +777,37 @@ export async function uploadCertificateAction(cnpj, fileBase64, password) {
             const company = Array.isArray(getBody) ? getBody[0] : getBody;
             if (company && company.id) {
                 targetId = company.id;
-                console.log(`[Focus NFe] Empresa encontrada! ID interno: ${targetId}`);
             }
-        } else {
-            console.warn(`[Focus NFe] Aviso: Busca de ID falhou (${resGet.status}). Tentando CNPJ direto...`);
         }
 
-        console.log(`[Focus NFe] URL Alvo: ${COMPANIES_API_BASE}/v2/empresas/${targetId}`);
-
-        // O endpoint correto é atualizar a própria empresa com os campos do certificado
         const res = await fetch(`${COMPANIES_API_BASE}/v2/empresas/${targetId}`, {
             method: 'PUT',
             headers,
             body: JSON.stringify(payload)
         });
 
-        // Tratamento específico para 404
-        if (res.status === 404) {
-            const errorTxt = await res.clone().text();
-            console.error('[Focus NFe Server] 404 no Upload:', errorTxt);
-            throw new Error('Erro 404: Empresa não foi encontrada na Focus NFe. Tente salvar os dados da empresa novamente.');
-        }
-
-        // Tratamento específico para 422
-        if (res.status === 422) {
-            const errorTxt = await res.clone().text();
-            console.error('[Focus NFe Server] 422 no Upload:', errorTxt);
-            // Tenta extrair mensagem JSON se possível
-            let msg = errorTxt;
-            try { msg = JSON.parse(errorTxt).mensagem || errorTxt; } catch (e) { }
-            throw new Error(`Erro 422: Dados rejeitados pela API. Detalhe: ${msg}`);
-        }
-
-        // Debug: Log Raw Response
-        const responseText = await res.text();
-        console.log(`[Focus NFe] Response Status: ${res.status}`);
-        console.log(`[Focus NFe] Response Body: ${responseText}`);
-
-        // Tenta parsear JSON
-        let data;
-        try {
-            data = responseText ? JSON.parse(responseText) : {};
-        } catch (e) {
-            // Se falhar o parse (ex: HTML ou Plain Text de erro)
-            throw new Error(`Erro API (${res.status}): ${responseText}`);
-        }
-
         if (!res.ok) {
-            throw new Error(data.mensagem || data.message || JSON.stringify(data));
+            const errorTxt = await res.text();
+            throw new Error(errorTxt);
         }
 
+        const data = await res.json();
         return { success: true, data };
 
     } catch (err) {
         console.error('[Focus NFe Server] Erro upload certificado:', err);
-        return {
-            success: false,
-            error: err.message || 'Erro desconhecido no upload',
-            debug: {
-                url: COMPANIES_API_BASE,
-                tokenEnding: tokenToUse ? '...' + tokenToUse.slice(-4) : 'UNDEFINED',
-                companyId: cnpjLimpo,
-                rawError: err.message
-            }
-        };
+        return { success: false, error: err.message || 'Erro desconhecido no upload' };
     }
 }
 
 /**
  * Atualizar APENAS configurações fiscais (Série, CSC, Ambiente)
- * Usa o token da própria empresa, pois não requer permissão de administrador.
  */
 export async function updateFiscalSettingsAction(data) {
     if (!data.cnpj) return { success: false, error: 'CNPJ obrigatório.' };
 
     const cnpjLimpo = data.cnpj.replace(/\D/g, '');
-    const AMBIENTE = (process.env.FOCUS_NFE_AMBIENTE || 'homologacao').trim();
-
-    // REGRA FOCUS: A gestão de empresas (PUT/POST) deve ser feita SEMPRE na URL de Produção.
-    // Mesmo para configurar parâmetros de homologação (csc_nfce_homologacao, etc).
     const COMPANIES_API_URL = 'https://api.focusnfe.com.br';
-
-    // TOKEN: Para acessar a API de Produção, precisamos de um token de Produção ou Revenda.
-    // O token de homologação (uL2a...) NÃO funciona na URL de produção.
     const token = process.env.FOCUS_NFE_TOKEN_PRODUCAO || process.env.FOCUS_NFE_TOKEN;
 
     if (!token) return { success: false, error: 'Token Focus NFe não configurado.' };
@@ -899,7 +824,6 @@ export async function updateFiscalSettingsAction(data) {
         if (data.proxima_nfce) payload.proximo_numero_nfce_producao = data.proxima_nfce;
         if (data.serie_nfe) payload.serie_nfe_producao = data.serie_nfe;
         if (data.proxima_nfe) payload.proximo_numero_nfe_producao = data.proxima_nfe;
-        // NFS-e (RPS)
         if (data.serie_nfse) payload.serie_nfse_producao = data.serie_nfse;
         if (data.proxima_nfse) payload.proximo_numero_nfse_producao = data.proxima_nfse;
     } else { // Homologação
@@ -909,57 +833,12 @@ export async function updateFiscalSettingsAction(data) {
         if (data.proxima_nfce) payload.proximo_numero_nfce_homologacao = data.proxima_nfce;
         if (data.serie_nfe) payload.serie_nfe_homologacao = data.serie_nfe;
         if (data.proxima_nfe) payload.proximo_numero_nfe_homologacao = data.proxima_nfe;
-        // NFS-e (RPS)
         if (data.serie_nfse) payload.serie_nfse_homologacao = data.serie_nfse;
         if (data.proxima_nfse) payload.proximo_numero_nfse_homologacao = data.proxima_nfse;
     }
 
-    // Campos Explícitos (NFS-e / RPS) - Para suportar o formulário completo
-    if (data.serie_nfse_producao) payload.serie_nfse_producao = data.serie_nfse_producao;
-    if (data.proximo_numero_nfse_producao) payload.proximo_numero_nfse_producao = data.proximo_numero_nfse_producao;
-    if (data.serie_nfse_homologacao) payload.serie_nfse_homologacao = data.serie_nfse_homologacao;
-    if (data.proximo_numero_nfse_homologacao) payload.proximo_numero_nfse_homologacao = data.proximo_numero_nfse_homologacao;
-
-    // NFSe Nacional
-    if (typeof data.habilita_nfse_nacional_producao === 'boolean') payload.habilita_nfse_nacional_producao = data.habilita_nfse_nacional_producao;
-    if (typeof data.habilita_nfse_nacional_homologacao === 'boolean') payload.habilita_nfse_nacional_homologacao = data.habilita_nfse_nacional_homologacao;
-
-    // Flags de Módulos (Independente de Ambiente)
-    if (typeof data.habilita_nfe === 'boolean') payload.habilita_nfe = data.habilita_nfe;
-    if (typeof data.habilita_nfce === 'boolean') payload.habilita_nfce = data.habilita_nfce;
-    if (typeof data.habilita_nfse === 'boolean') payload.habilita_nfse = data.habilita_nfse;
-
-    // Campos de Login da Prefeitura (NFSe)
-    // Mapeamento exaustivo para garantir compatibilidade com diferentes provedores/versões
-    if (data.login_prefeitura) {
-        const login = String(data.login_prefeitura).trim();
-        payload.login_prefeitura = login;
-        payload.iss_usuario = login;
-        payload.usuario_nfse = login;
-        payload.login_responsavel = login; // Campo identificado via diagnóstico
-    }
-    if (data.senha_prefeitura) {
-        const senha = String(data.senha_prefeitura).trim();
-        payload.senha_prefeitura = senha;
-        payload.iss_senha = senha;
-        payload.senha_nfse = senha;
-        payload.senha_responsavel = senha; // Campo identificado via diagnóstico
-    }
-
-    if (Object.keys(payload).length === 0) {
-        return { success: true, warning: 'Nenhum dado fiscal para atualizar.' };
-    }
-
-    console.log(`[Focus NFe] Sync Fiscal Settings - URL: ${COMPANIES_API_URL}, CNPJ: ${cnpjLimpo}`);
-
     try {
-        // PASSO 1: BUSCAR ID da Empresa via CNPJ
-        // A atualização direta via CNPJ (PUT .../CNPJ) falha com 404/403 se o token for de revenda.
-        // Mas a atualização via ID (PUT .../ID) funciona.
-        console.log(`[Focus NFe] Buscando ID da empresa ${cnpjLimpo}...`);
-
-        let targetId = cnpjLimpo; // Fallback default
-
+        let targetId = cnpjLimpo;
         const resGet = await fetch(`${COMPANIES_API_URL}/v2/empresas?cnpj=${cnpjLimpo}`, {
             method: 'GET',
             headers
@@ -967,22 +846,10 @@ export async function updateFiscalSettingsAction(data) {
 
         if (resGet.ok) {
             const getBody = await resGet.json();
-            // Retorna array de empresas ou objeto único? Focus retorna array na busca por CNPJ.
             const company = Array.isArray(getBody) ? getBody[0] : getBody;
-
-            if (company && company.id) {
-                targetId = company.id;
-                console.log(`[Focus NFe] Empresa encontrada! ID interno: ${targetId}`);
-            } else {
-                console.warn('[Focus NFe] Aviso: Empresa não encontrada na busca por CNPJ. Tentando PUT direto no CNPJ...');
-            }
-        } else {
-            const txtGet = await resGet.text();
-            console.warn(`[Focus NFe] Aviso: Erro na busca por CNPJ (${resGet.status}): ${txtGet}. Tentando PUT direto...`);
+            if (company && company.id) targetId = company.id;
         }
 
-        // PASSO 2: ATUALIZAR via ID
-        console.log(`[Focus NFe] PUT ${COMPANIES_API_URL}/v2/empresas/${targetId}`);
         const res = await fetch(`${COMPANIES_API_URL}/v2/empresas/${targetId}`, {
             method: 'PUT',
             headers,
@@ -991,34 +858,12 @@ export async function updateFiscalSettingsAction(data) {
 
         if (res.ok) {
             const result = await res.json();
-            console.log('[Focus NFe Server] Configurações fiscais sincronizadas com sucesso!');
             return { success: true, data: result, action: 'updated_fiscal' };
         }
 
         const txt = await res.text();
-        console.error('[Focus Nfe] Erro Sync Fiscal:', txt);
-
-        // Soft Fail para Permissão (403/401) e Não Encontrado (404)
-        if (res.status === 404 || txt.includes('nao_encontrado') || txt.includes('Empresa nao encontrada')) {
-            return {
-                success: true,
-                warning: 'A empresa ainda não consta na base da Focus Nfe. As configurações foram salvas localmente e serão sincronizadas quando o Administrador realizar o cadastro oficial.',
-                action: 'saved_locally_404'
-            };
-        }
-
-        if (res.status === 403 || res.status === 401 || txt.includes('Access denied')) {
-            return {
-                success: true,
-                warning: 'Acesso negado ao atualizar configurações na Focus. As configurações foram salvas localmente e serão usadas na emissão.',
-                action: 'saved_locally_bypass'
-            };
-        }
-
         return { success: false, error: txt };
-
     } catch (err) {
-        console.error('[Focus NFe Server] Erro updateFiscalSettingsAction:', err.message);
         return { success: false, error: err.message };
     }
 }
@@ -1031,8 +876,6 @@ export async function getCertificateInfoAction(cnpj) {
 
     const cnpjLimpo = cnpj.replace(/\D/g, '');
     const COMPANIES_API_URL = 'https://api.focusnfe.com.br';
-
-    // Token: Tenta o token de produção
     const token = process.env.FOCUS_NFE_TOKEN_PRODUCAO || process.env.FOCUS_NFE_TOKEN;
     if (!token) return { success: false, error: 'Token Focus NFe não configurado.' };
 
@@ -1040,38 +883,27 @@ export async function getCertificateInfoAction(cnpj) {
     const headers = { 'Authorization': authHeader, 'Content-Type': 'application/json' };
 
     try {
-        console.log(`[Focus NFe] Buscando info do certificado para ${cnpjLimpo}...`);
-
-        // Busca empresa por CNPJ
         const resGet = await fetch(`${COMPANIES_API_URL}/v2/empresas?cnpj=${cnpjLimpo}`, {
             method: 'GET',
             headers
         });
 
-        if (!resGet.ok) {
-            throw new Error(`Erro ao buscar empresa: ${resGet.status}`);
-        }
+        if (!resGet.ok) throw new Error(`Erro ao buscar empresa: ${resGet.status}`);
 
         const body = await resGet.json();
         const company = Array.isArray(body) ? body[0] : body;
 
-        if (!company) {
-            return { success: false, error: 'Empresa não encontrada.' };
-        }
+        if (!company) return { success: false, error: 'Empresa não encontrada.' };
 
-        // Retornar dados relevantes do certificado
         return {
             success: true,
             data: {
                 validade: company.certificado_valido_ate,
                 tem_certificado: !!company.certificado_valido_ate,
                 cnpj_certificado: company.cnpj_certificado,
-                // A senha nunca é retornada por segurança, mas sabemos que existe se tem validade
             }
         };
-
     } catch (err) {
-        console.error('[Focus NFe Server] Erro getCertificateInfoAction:', err.message);
         return { success: false, error: err.message };
     }
 }
@@ -1088,50 +920,29 @@ async function downloadPdfFromUrl(url) {
 /**
  * Obter XML da NFSe
  */
-/**
- * Obter XML da NFSe
- */
 export async function getXmlNFSeAction(rawRef, snapshot = null) {
     const ref = rawRef?.trim();
-    console.log(`[getXmlNFSeAction] Start for ref: "${ref}"`);
-
     try {
-        // Tenta usar dados do snapshot se fornecidos (evita requisições extras)
         let responseData = snapshot?.response_data || null;
         let xmlPath = responseData?.caminho_xml_nota_fiscal || null;
 
         if (!xmlPath) {
-            // Tenta obter o XML diretamente via API
             try {
                 const xmlRes = await focusNfeRequest(`/v2/nfse/${encodeURIComponent(ref)}.xml`, 'GET');
                 return { success: true, data: xmlRes };
             } catch (apiErr) {
-                console.warn(`[Focus NFe] API Direct fetch failed for "${ref}". Attempting database fallback...`);
-
                 const cookieStore = cookies();
                 const supabase = createServerClient(
                     process.env.NEXT_PUBLIC_SUPABASE_URL,
                     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-                    {
-                        cookies: {
-                            get(name) { return cookieStore.get(name)?.value; },
-                            set(name, value, options) { },
-                            remove(name, options) { },
-                        },
-                    }
+                    { cookies: { get(name) { return cookieStore.get(name)?.value; } } }
                 );
 
-                // Busca no banco por REF ou por ID (caso o que veio seja o UUID)
-                const { data: nfse, error: dbError } = await supabase
+                const { data: nfse } = await supabase
                     .from('nfse')
-                    .select('id, response_data')
+                    .select('response_data')
                     .or(`ref.eq."${ref}",id.eq."${ref}"`)
                     .single();
-
-                if (dbError) {
-                    console.error(`[getXmlNFSeAction] DB Fallback error for "${ref}":`, dbError.message);
-                    throw apiErr; // Re-joga o erro da API se não achar no banco
-                }
 
                 responseData = nfse?.response_data;
                 xmlPath = responseData?.caminho_xml_nota_fiscal;
@@ -1139,47 +950,32 @@ export async function getXmlNFSeAction(rawRef, snapshot = null) {
         }
 
         if (xmlPath) {
-            console.log(`[getXmlNFSeAction] Fetching XML from specific path: ${xmlPath}`);
             const xmlRes = await focusNfeRequest(xmlPath, 'GET');
             return { success: true, data: xmlRes };
         }
 
-        if (responseData) {
-            return { success: true, data: responseData };
-        }
-
-        return { success: false, error: 'Nota fiscal não encontrada no sistema ou na API.' };
-
+        if (responseData) return { success: true, data: responseData };
+        return { success: false, error: 'Nota fiscal não encontrada.' };
     } catch (err) {
-        console.error('[portal-contador] Erro ao baixar XML:', err.message);
-        return { success: false, error: err.message || 'Nota fiscal não encontrada.' };
+        return { success: false, error: err.message };
     }
 }
 
 
 /**
- * Obter PDF da NFe (Base64) - Smart (Tenta NFe, depois NFCe)
+ * Obter PDF da NFe (Base64) - Smart
  */
 export async function getPdfNFeAction(ref) {
     try {
-        // Tentativa 1: NFe
         try {
             const result = await focusNfeRequest(`/v2/nfe/${encodeURIComponent(ref)}?completa=1`, 'GET');
-            if (result.caminho_danfe) {
-                return await downloadPdfFromUrl(result.caminho_danfe);
-            }
-        } catch (e) {
-            // Ignora erro NFe e tenta NFCe
-            // Se o erro for de conexão, vai falhar no próximo também.
-        }
+            if (result.caminho_danfe) return await downloadPdfFromUrl(result.caminho_danfe);
+        } catch (e) { }
 
-        // Tentativa 2: NFCe (Fallback transparente)
         const resultNFCe = await focusNfeRequest(`/v2/nfce/${encodeURIComponent(ref)}?completa=1`, 'GET');
-        if (resultNFCe.caminho_danfe) {
-            return await downloadPdfFromUrl(resultNFCe.caminho_danfe);
-        }
+        if (resultNFCe.caminho_danfe) return await downloadPdfFromUrl(resultNFCe.caminho_danfe);
 
-        return { success: false, error: 'PDF não disponível (NFe/NFCe)' };
+        return { success: false, error: 'PDF não disponível.' };
     } catch (err) {
         return { success: false, error: err.message };
     }
@@ -1188,13 +984,8 @@ export async function getPdfNFeAction(ref) {
 /**
  * Obter PDF da NFSe (Base64)
  */
-/**
- * Obter PDF da NFSe (Base64)
- */
 export async function getPdfNFSeAction(rawRef, snapshot = null) {
     const ref = rawRef?.trim();
-    console.log(`[getPdfNFSeAction] Start for ref: "${ref}"`);
-
     try {
         let pdfUrl = snapshot?.response_data?.url_danfse || snapshot?.response_data?.caminho_danfse || null;
 
@@ -1203,49 +994,26 @@ export async function getPdfNFSeAction(rawRef, snapshot = null) {
                 const result = await focusNfeRequest(`/v2/nfse/${encodeURIComponent(ref)}`, 'GET');
                 pdfUrl = result.url_danfse || result.caminho_danfse || result.url;
             } catch (apiErr) {
-                console.warn(`[Focus NFe] API PDF fetch failed for "${ref}". Attempting database fallback...`);
-
                 const cookieStore = cookies();
                 const supabase = createServerClient(
                     process.env.NEXT_PUBLIC_SUPABASE_URL,
                     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-                    {
-                        cookies: {
-                            get(name) { return cookieStore.get(name)?.value; },
-                            set(name, value, options) { },
-                            remove(name, options) { },
-                        },
-                    }
+                    { cookies: { get(name) { return cookieStore.get(name)?.value; } } }
                 );
 
-                const { data: nfse, error: dbError } = await supabase
+                const { data: nfse } = await supabase
                     .from('nfse')
-                    .select('id, response_data')
+                    .select('response_data')
                     .or(`ref.eq."${ref}",id.eq."${ref}"`)
                     .single();
 
-                if (dbError) {
-                    console.error(`[getPdfNFSeAction] DB Fallback error for "${ref}":`, dbError.message);
-                    throw apiErr;
-                }
-
-                if (nfse?.response_data) {
-                    console.log(`[getPdfNFSeAction] Found in DB! ID: ${nfse.id}`);
-                    pdfUrl = nfse.response_data.url_danfse || nfse.response_data.caminho_danfse;
-                }
-
-                if (!pdfUrl) throw apiErr;
+                pdfUrl = nfse?.response_data?.url_danfse || nfse?.response_data?.caminho_danfse;
             }
         }
 
-        if (pdfUrl) {
-            console.log(`[getPdfNFSeAction] Downloading PDF from: ${pdfUrl}`);
-            return await downloadPdfFromUrl(pdfUrl);
-        }
-
-        return { success: false, error: 'PDF não disponível para esta nota.' };
+        if (pdfUrl) return await downloadPdfFromUrl(pdfUrl);
+        return { success: false, error: 'PDF não disponível.' };
     } catch (err) {
-        console.error('[portal-contador] Erro ao baixar PDF:', err.message);
-        return { success: false, error: err.message || 'Nota fiscal não encontrada.' };
+        return { success: false, error: err.message };
     }
 }
