@@ -6,14 +6,10 @@ let _supabase = null;
 function getSupabase() {
   if (_supabase) return _supabase;
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  if (!supabaseUrl || !supabaseAnonKey) {
-    throw new Error(
-      'NEXT_PUBLIC_SUPABASE_URL e NEXT_PUBLIC_SUPABASE_ANON_KEY precisam estar configuradas.'
-    );
-  }
+  // Se as variáveis de ambiente não estiverem configuradas (ex: durante o build na nuvem),
+  // usamos placeholders para evitar crash de compilação.
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://placeholder.supabase.co';
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placeholder-anon-key';
 
   _supabase = createBrowserClient(supabaseUrl, supabaseAnonKey);
   return _supabase;
@@ -22,6 +18,11 @@ function getSupabase() {
 // Lazy proxy: o client só é criado quando acessado em runtime (nunca no build).
 export const supabase = new Proxy({}, {
   get(_target, prop) {
-    return getSupabase()[prop];
+    const client = getSupabase();
+    const value = client[prop];
+    if (typeof value === 'function') {
+      return value.bind(client);
+    }
+    return value;
   },
 });
