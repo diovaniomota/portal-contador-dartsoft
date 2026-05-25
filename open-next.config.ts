@@ -1,8 +1,7 @@
-import type { OpenNextConfig } from "@opennextjs/aws/types/open-next.js";
+import { defineCloudflareConfig } from "@opennextjs/cloudflare";
 
-const config: OpenNextConfig = {
-  default: {},
-  middleware: {},
-};
+const config = defineCloudflareConfig();
+
+config.buildCommand = "npm run next:build";
 
 export default config;

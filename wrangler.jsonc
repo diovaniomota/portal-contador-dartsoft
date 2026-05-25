@@ -2,10 +2,14 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "main": ".open-next/worker.js",
   "name": "portal-contabilidade",
-  "compatibility_date": "2025-04-01",
+  "compatibility_date": "2026-05-25",
   "compatibility_flags": [
-    "nodejs_compat"
+    "nodejs_compat",
+    "global_fetch_strictly_public"
   ],
+  "vars": {
+    "FOCUS_NFE_AMBIENTE": "producao"
+  },
   "assets": {
     "directory": ".open-next/assets",
     "binding": "ASSETS"
