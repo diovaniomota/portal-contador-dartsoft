@@ -45,11 +45,11 @@ export default function DashboardPage() {
             // Get Organization ID
             const { data: user, error: userError } = await supabase
                 .from('app_users')
-                .select('organization_id, name, organizations(nome_fantasia)')
+                .select('organization_id, name')
                 .eq('auth_id', userId);
 
             if (userError) {
-                console.error('Database fetch error:', userError);
+                console.error('Database fetch error (user):', userError);
                 return;
             }
 
@@ -62,9 +62,24 @@ export default function DashboardPage() {
             }
 
             const userData = user[0];
-            setUserName(userData.name);
-            setOrgName(userData.organizations?.nome_fantasia);
             const orgId = userData.organization_id;
+            
+            let fetchedOrgName = '';
+            if (orgId) {
+                const { data: orgData, error: orgError } = await supabase
+                    .from('organizations')
+                    .select('nome_fantasia')
+                    .eq('id', orgId);
+                
+                if (!orgError && orgData && orgData.length > 0) {
+                    fetchedOrgName = orgData[0].nome_fantasia;
+                } else {
+                    console.error('Database fetch error (org):', orgError);
+                }
+            }
+
+            setUserName(userData.name);
+            setOrgName(fetchedOrgName);
 
 
             // Calculate start and end of month
